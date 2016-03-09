@@ -3,8 +3,8 @@ package data
 import (
 	"log"
 
-	riakprotobuf "likemindnetworks.com/riak/protobuf"
-	riakcli "likemindnetworks.com/riak/client"
+	riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
+	riakcli "github.com/likemindnetworks/riakdataportation/client"
 )
 
 func Export(

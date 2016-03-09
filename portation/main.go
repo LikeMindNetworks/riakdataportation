@@ -5,8 +5,8 @@ import (
 	"time"
 	"regexp"
 
-	riakdata "likemindnetworks.com/riak/data"
-	riakcli "likemindnetworks.com/riak/client"
+	riakdata "github.com/likemindnetworks/riakdataportation/data"
+	riakcli "github.com/likemindnetworks/riakdataportation/client"
 )
 
 func main() {

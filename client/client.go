@@ -11,7 +11,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	riakprotobuf "likemindnetworks.com/riak/protobuf"
+	riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 )
 
 type Client struct {
