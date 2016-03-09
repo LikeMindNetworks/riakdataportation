@@ -39,7 +39,6 @@ func NewClient(host string, connCnt int) *Client {
 		connCnt: connCnt,
 		conns: make(chan *net.TCPConn, chanBufSize),
 	}
-	cli.conns <- nil
 
 	return cli
 }
@@ -50,7 +49,7 @@ func (c *Client) Connect() error {
 	defer c.connMutex.RUnlock()
 
 	dialer := new(net.Dialer)
-	dialer.Timeout = time.Minute
+	dialer.Timeout = 10 * time.Second
 
 	tcpaddr, err := net.ResolveTCPAddr("tcp", c.host)
 	if err != nil {
@@ -59,29 +58,29 @@ func (c *Client) Connect() error {
 
 	if c.connCnt <= 0 {
 		return BadNumberOfConnections
-	} else if conn := <-c.conns; conn == nil {
-		// Create multiple connections to Riak
-		// and send these to the conns channel for later use
-		for i := 0; i < c.connCnt; i++ {
-			conn, err := dialer.Dial("tcp", tcpaddr.String())
+	}
 
-			if err != nil {
-				// Empty the conns channel before returning,
-				// in case an error appeared after a few
-				// successful connections.
-				for j := 0; j < i; j++ {
-					(<-c.conns).Close()
-				}
+	// Create multiple connections to Riak
+	// and send these to the conns channel for later use
+	for i := 0; i < c.connCnt; i++ {
+		conn, err := dialer.Dial("tcp", tcpaddr.String())
 
-				c.conns <- nil
-				return err
+		if err != nil {
+			log.Printf("Connection #%d to %s failed", i, tcpaddr)
+
+			// Empty the conns channel before returning,
+			// in case an error appeared after a few
+			// successful connections.
+			for j := 0; j < i; j++ {
+				(<-c.conns).Close()
 			}
 
-			log.Printf("Connection #%d to %s successful", i, tcpaddr)
-			c.conns <- conn.(*net.TCPConn)
+			c.conns <- nil
+			return err
 		}
-	} else {
-		c.conns <- conn
+
+		log.Printf("Connection #%d to %s successful", i, tcpaddr)
+		c.conns <- conn.(*net.TCPConn)
 	}
 
 	return nil
@@ -112,19 +111,24 @@ func (c *Client) ReleaseConnection(conn *net.TCPConn) {
 	c.conns <- conn
 }
 
-// send message
-func (c *Client) SendMessage(req proto.Message, code byte) (err error, conn *net.TCPConn) {
+// send message, returns err, connection, and raw message including header
+func (c *Client) SendMessage(
+		req proto.Message, code byte,
+) (err error, conn *net.TCPConn, msgbuf []byte) {
 	conn = <-c.conns
+	if conn == nil {
+		return BadNumberOfConnections, nil, nil
+	}
 
 	// Serialize the request using protobuf
 	pbmsg, err := proto.Marshal(req)
 	if err != nil {
-		return err, conn
+		return err, nil, nil
 	}
 
 	// Build message with header: <length:32> <msg_code:8> <pbmsg>
 	i := int32(len(pbmsg) + 1)
-	msgbuf := []byte{byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i), code}
+	msgbuf = []byte{byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i), code}
 	msgbuf = append(msgbuf, pbmsg...)
 
 	// Send to Riak
@@ -150,15 +154,16 @@ func (c *Client) SendMessage(req proto.Message, code byte) (err error, conn *net
 		}
 	}
 
-	return err, conn
+	return
 }
 
-// receive message, deserializes the data and returns a struct.
-func (c *Client) ReceiveMessage(
-		conn *net.TCPConn, response proto.Message, keepAlive bool) (err error) {
+// receive message, returns error, header bytes, and body bytes separately
+func (c *Client) ReceiveRawMessage(
+		conn *net.TCPConn, keepAlive bool,
+) (err error, headerbuf []byte, responsebuf []byte) {
 
 	// Read the response from Riak
-	msgbuf, err := c.read(conn, 5)
+	err, headerbuf = c.read(conn, 5)
 
 	if err != nil {
 		c.ReleaseConnection(conn)
@@ -169,7 +174,7 @@ func (c *Client) ReceiveMessage(
 			c.Close()
 		}
 
-		return err
+		return err, nil, nil
 	}
 
 	if (!keepAlive) {
@@ -177,46 +182,58 @@ func (c *Client) ReceiveMessage(
 	}
 
 	// Check the length
-	if len(msgbuf) < 5 {
-		return BadResponseLength
+	if len(headerbuf) < 5 {
+		return BadResponseLength, nil, nil
 	}
 
 	// Read the message length, read the rest of the message if necessary
-	msglen := int(msgbuf[0])<<24 +
-		int(msgbuf[1])<<16 +
-		int(msgbuf[2])<<8 +
-		int(msgbuf[3])
+	msglen := int(headerbuf[0]) << 24 +
+		int(headerbuf[1]) << 16 +
+		int(headerbuf[2]) << 8 +
+		int(headerbuf[3])
 
-	pbmsg, err := c.read(conn, msglen-1)
+	err, responsebuf = c.read(conn, msglen - 1)
+
+	return
+}
+
+// receive message, deserializes the data and returns a struct.
+func (c *Client) ReceiveMessage(
+		conn *net.TCPConn, response proto.Message, keepAlive bool,
+) (err error) {
+
+	err, headerbuf, responsebuf := c.ReceiveRawMessage(conn, keepAlive)
 	if err != nil {
 		return err
 	}
 
 	// Deserialize,
 	// by default the calling method should provide the expected RbpXXXResp
-	msgcode := msgbuf[4]
+	msgcode := headerbuf[4]
 	switch msgcode {
 	case riakprotobuf.CodeRpbErrorResp:
 		errResp := &riakprotobuf.RpbErrorResp{}
-		err = proto.Unmarshal(pbmsg, errResp)
+		err = proto.Unmarshal(responsebuf, errResp)
 		if err == nil {
 			err = errors.New(string(errResp.GetErrmsg()))
 		}
 	case riakprotobuf.CodeRpbPingResp,
-		riakprotobuf.CodeRpbSetClientIdResp,
-		riakprotobuf.CodeRpbSetBucketResp,
-		riakprotobuf.CodeRpbDelResp:
+			riakprotobuf.CodeRpbSetClientIdResp,
+			riakprotobuf.CodeRpbSetBucketResp,
+			riakprotobuf.CodeRpbDelResp:
 		return nil
 	default:
 		// log.Printf("Msg code: %d Msg size: %d received", msgcode, msglen)
-		err = proto.Unmarshal(pbmsg, response)
+		err = proto.Unmarshal(responsebuf, response)
 	}
 
 	return err
 }
 
 // Read data from the connection
-func (c *Client) read(conn *net.TCPConn, size int) (response []byte, err error) {
+func (c *Client) read(
+		conn *net.TCPConn, size int,
+) (err error, response []byte) {
 	response = make([]byte, size)
 	s := 0
 
