@@ -4,7 +4,6 @@ import (
 	"errors"
 	"bufio"
 	"log"
-	"reflect"
 	"sync"
 	"net"
 	"time"
@@ -14,7 +13,7 @@ import (
 )
 
 var (
-	AlreadyRunning = errors.New("Export is already running")
+	ExportAlreadyRunning = errors.New("Export is already running")
 )
 
 type Export struct {
@@ -24,6 +23,7 @@ type Export struct {
 	dtBucketTypes []string
 	output *bufio.Writer
 	outputChan chan []byte
+	outputMutex sync.Mutex
 	errorChan chan error
 	wg sync.WaitGroup
 }
@@ -52,7 +52,7 @@ func NewExport(
 func (e *Export) Run() (err error) {
 
 	if e.outputChan != nil {
-		return AlreadyRunning
+		return ExportAlreadyRunning
 	}
 
 	startTime := time.Now()
@@ -116,9 +116,9 @@ QUIT:
 	return
 }
 
-func (e *Export) isRiakDtBucket(bucket []byte) bool {
+func (e *Export) isRiakDtBucketType(bt []byte) bool {
 	for _, b := range e.dtBucketTypes {
-		if reflect.DeepEqual(bucket, b) {
+		if string(bt) == b {
 			return true
 		}
 	}
@@ -244,7 +244,7 @@ func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
 		reqbuf []byte
 	)
 
-	if (e.isRiakDtBucket(bucket)) {
+	if (e.isRiakDtBucketType(bt)) {
 		req := riakprotobuf.DtFetchReq{
 			Type: bt,
 			Bucket: bucket,
@@ -276,6 +276,9 @@ func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
 
 	// output the raw messages
 	// all messages should be self-decoding
+
+	e.outputMutex.Lock()
+	defer e.outputMutex.Unlock()
 
 	e.outputChan <- reqbuf
 	e.outputChan <- headerbuf
