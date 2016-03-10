@@ -67,10 +67,22 @@ func main() {
 		panic("app name and data version should never contain @ or :")
 	}
 
+	// warn when try to override appName during import
+	if action == "import" && len(*appName) > 0 {
+		fmt.Println("Trying to override app name during import. Are you sure?");
+		fmt.Printf("Type the full app name (%s) to confirm: ", *appName)
+
+		readConfirm := bufio.NewReader(os.Stdin)
+		text, _ := readConfirm.ReadString('\n')
+
+		if text[:len(text) - 1] != *appName {
+			panic("Not Confirmed. Abort import.")
+		}
+	}
+
 	// start
 	startTime := time.Now()
 
-	// "Riak-dev-ELB-749646943.us-east-1.elb.amazonaws.com:8087"
 	var cli = riakcli.NewClient(host, *numConnection)
 
 	err := cli.Connect()
