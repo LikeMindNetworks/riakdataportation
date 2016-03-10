@@ -31,7 +31,7 @@ func printHelp() {
 }
 
 func main() {
-	log.Printf("Riak Data Portation Tool")
+	fmt.Println("Riak Data Portation Tool")
 
 	var (
 		numConnection = flag.Int("c", 20, "number of connections")
