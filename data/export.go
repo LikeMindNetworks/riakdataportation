@@ -3,10 +3,10 @@ package data
 import (
 	"errors"
 	"bufio"
-	"log"
 	"sync"
 	"net"
-	"time"
+
+	// "log"
 
 	riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
@@ -25,6 +25,8 @@ type Export struct {
 	outputChan chan []byte
 	outputMutex sync.Mutex
 	errorChan chan error
+	unitOfWorkChan chan int
+	unitOfWorkFinishedChan chan int
 	wg sync.WaitGroup
 }
 
@@ -49,35 +51,47 @@ func NewExport(
 	}
 }
 
-func (e *Export) Run() (err error) {
+func (e *Export) Run(progressChan chan float64) (byteCnt int, err error) {
 
 	if e.outputChan != nil {
-		return ExportAlreadyRunning
+		return 0, ExportAlreadyRunning
 	}
-
-	startTime := time.Now()
-	log.Printf(
-		"Exporting the following bucket types %s %s",
-		e.bucketTypes, e.dtBucketTypes,
-	)
 
 	e.outputChan = make(chan []byte)
 	e.errorChan = make(chan error)
+	e.unitOfWorkChan = make(chan int, 100)
+	e.unitOfWorkFinishedChan = make(chan int, 100)
 
-	totalByteCnt := 0
+	unitOfWorkFinished := 0
+	unitOfWorkTotal := 0
 	quit := make(chan int)
 
 	go func() {
 		for {
 			select {
 			case data, ok := <- e.outputChan:
+				// collects all output bytes
 				if ok {
-					totalByteCnt += len(data)
+					byteCnt += len(data)
 					_, err = e.output.Write(data)
 				} else {
 					err = e.output.Flush()
 					goto QUIT
 				}
+			case u := <- e.unitOfWorkFinishedChan:
+				unitOfWorkFinished += u
+
+				// update progress
+				if progressChan != nil {
+					if unitOfWorkTotal > 0 {
+						progressChan <- float64(unitOfWorkFinished) /
+							float64(unitOfWorkTotal)
+					} else {
+						progressChan <- 0
+					}
+				}
+			case u := <- e.unitOfWorkChan:
+				unitOfWorkTotal += u
 			case err = <- e.errorChan:
 				goto QUIT
 			}
@@ -87,32 +101,40 @@ QUIT:
 		quit <- 0
 	}()
 
-	e.wg.Add(len(e.bucketTypes))
+	bucketTypesCnt := len(e.bucketTypes)
+	e.wg.Add(bucketTypesCnt)
+	e.unitOfWorkChan <- bucketTypesCnt
 	for _, bt := range e.bucketTypes {
 		go e.processBucketType([]byte(bt))
 	}
 
-	e.wg.Add(len(e.dtBucketTypes))
+	dtBucketTypesCnt := len(e.dtBucketTypes)
+	e.wg.Add(dtBucketTypesCnt)
+	e.unitOfWorkChan <- dtBucketTypesCnt
 	for _, bt := range e.dtBucketTypes {
 		go e.processBucketType([]byte(bt))
 	}
 
+	// wait for all goroutinues
 	e.wg.Wait()
 
 	// no more data after this point
 	close(e.outputChan)
 	close(e.errorChan)
 
+	// wait for io
 	<-quit
 
-	if err == nil {
-		log.Printf(
-			"%d total bytes writen in %s", totalByteCnt, time.Since(startTime),
-		)
-	}
-
+	// reset channels
 	e.outputChan = nil
 	e.errorChan  = nil
+	e.unitOfWorkChan = nil
+	e.unitOfWorkFinishedChan  = nil
+
+	// close progress
+	if progressChan != nil {
+		close(progressChan)
+	}
 	return
 }
 
@@ -175,16 +197,14 @@ func (e *Export) processBucketType(bt []byte) {
 	}
 
 	// fan out process
-	log.Printf(
-		"%d buckets to be to processed of bucket type [%s] (out of %d)",
-		filteredBucketsCnt, bt, len(buckets),
-	)
-
 	e.wg.Add(filteredBucketsCnt)
 
 	for _, b := range filteredBuckets {
+		e.unitOfWorkChan <- 1
 		go e.processBucket(bt, b)
 	}
+
+	e.unitOfWorkFinishedChan <- 1
 }
 
 func (e *Export) processBucket(bt []byte, bucket []byte) {
@@ -223,16 +243,15 @@ func (e *Export) processBucket(bt []byte, bucket []byte) {
 	// fan out process
 	keyCnt := len(keys)
 
-	log.Printf(
-		"%d keys to be to processed in bucket [%s] of bucket type [%s]",
-		keyCnt, bucket, bt,
-	)
-
 	e.wg.Add(keyCnt)
 
 	for _, key := range keys {
 		go e.processKey(bt, bucket, key)
 	}
+
+	// update progress
+	e.unitOfWorkFinishedChan <- 1
+	e.unitOfWorkChan <- keyCnt
 }
 
 func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
@@ -283,4 +302,5 @@ func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
 	e.outputChan <- reqbuf
 	e.outputChan <- headerbuf
 	e.outputChan <- responsebuf
+	e.unitOfWorkFinishedChan <- 1
 }

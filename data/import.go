@@ -3,10 +3,8 @@ package data
 import (
 	"errors"
 	"bufio"
-	"log"
 	"io"
 	"sync"
-	"time"
 
 	"github.com/golang/protobuf/proto"
 
@@ -24,6 +22,7 @@ type Import struct {
 	bucketOverrideFn func([]byte) []byte
 	wg sync.WaitGroup
 	errorChan chan error
+	byteTransferedChan chan int
 }
 
 type reqRespPair struct {
@@ -49,25 +48,39 @@ func NewImport(
 	}
 }
 
-func (imp *Import) Run() (err error) {
+func (imp *Import) Run(progressChan chan float64) (byteCnt int, err error) {
 
 	if imp.errorChan != nil {
-		return ImportAlreadyRunning
+		return 0, ImportAlreadyRunning
 	}
 
 	imp.errorChan = make(chan error)
+	imp.byteTransferedChan = make(chan int)
 
 	headerBuf := make([]byte, 5, 5)
-	totalByteCnt := 0
 	quit := make(chan int)
-
-	startTime := time.Now()
-	log.Printf("Importing")
+	byteTransferedCnt := 0
 
 	// abort on error
 	go func() {
-		err, _ = <- imp.errorChan
-		quit <- 0
+		for {
+			select {
+			case b := <- imp.byteTransferedChan:
+				byteTransferedCnt += b
+
+				// update progress
+				if progressChan != nil {
+					if byteCnt > 0 {
+						progressChan <- float64(byteTransferedCnt) / float64(byteCnt)
+					} else {
+						progressChan <- 0
+					}
+				}
+			case err, _ = <- imp.errorChan:
+				// either there is an error, or the channel ended
+				quit <- 0
+			}
+		}
 	}()
 
 	for {
@@ -86,7 +99,7 @@ func (imp *Import) Run() (err error) {
 			break
 		}
 
-		totalByteCnt += 4 + 1 + int(msgSize)
+		byteCnt += 4 + 1 + int(msgSize)
 
 		// load a response
 
@@ -103,7 +116,7 @@ func (imp *Import) Run() (err error) {
 			break
 		}
 
-		totalByteCnt += 4 + 1 + int(msgSize)
+		byteCnt += 4 + 1 + int(msgSize)
 
 		// process
 		imp.wg.Add(1)
@@ -126,13 +139,13 @@ func (imp *Import) Run() (err error) {
 		err = nil
 	}
 
-	if err == nil {
-		log.Printf(
-			"%d total bytes imported in %s", totalByteCnt, time.Since(startTime),
-		)
-	}
-
 	imp.errorChan  = nil
+	imp.byteTransferedChan = nil
+
+	// close progress
+	if progressChan != nil {
+		close(progressChan)
+	}
 	return
 }
 
@@ -213,6 +226,8 @@ func (imp *Import) processPair(pair *reqRespPair) {
 				resMsg.(*riakprotobuf.DtFetchResp),
 			)
 	}
+
+	imp.byteTransferedChan <- len(pair.reqBuf) + len(pair.resBuf) + 10
 }
 
 func (imp *Import) importKV(
