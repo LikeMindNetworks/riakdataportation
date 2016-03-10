@@ -5,8 +5,11 @@ import (
 	"bufio"
 	"regexp"
 	"log"
+	"fmt"
 	"time"
-	// "strings"
+	"flag"
+	"strings"
+	"path"
 
 	"github.com/cheggaaa/pb"
 
@@ -14,18 +17,61 @@ import (
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
 )
 
+const Version = "1.0.0"
+
 func check(e error) {
 	if e != nil {
 		panic(e)
 	}
 }
 
+func printHelp() {
+	fmt.Println("Usage: portation <export|import> <riak host with port>")
+	flag.PrintDefaults()
+}
+
 func main() {
 	log.Printf("Riak Data Portation Tool")
+
+	var (
+		numConnection = flag.Int("c", 20, "number of connections")
+		appName = flag.String("a", "", "app name")
+		dataVersion = flag.String("d", "", "data version")
+		inputFile = flag.String("i", "", "input file for import")
+		outputDir = flag.String("o", ".", "output folder for export result")
+		printVersion = flag.Bool("v", false, "print version")
+	)
+
+	flag.Parse()
+
+	if *printVersion {
+		fmt.Println(Version)
+		return
+	}
+
+	if len(flag.Args()) != 2 {
+		printHelp()
+		return
+	}
+
+	action := flag.Args()[0]
+	host := flag.Args()[1]
+
+	if action != "import" && action != "export" {
+		printHelp()
+		return
+	}
+
+	if strings.ContainsAny(*appName, "@:") ||
+			strings.ContainsAny(*dataVersion, "@:") {
+		panic("app name and data version should never contain @ or :")
+	}
+
+	// start
 	startTime := time.Now()
 
-	var cli = riakcli.
-		NewClient("Riak-dev-ELB-749646943.us-east-1.elb.amazonaws.com:8087", 20)
+	// "Riak-dev-ELB-749646943.us-east-1.elb.amazonaws.com:8087"
+	var cli = riakcli.NewClient(host, *numConnection)
 
 	err := cli.Connect()
 	check(err)
@@ -60,9 +106,14 @@ func main() {
 		}
 	}()
 
+	var byteCnt int
 
-	// byteCnt := runExport(cli, prog)
-	byteCnt := runImport(cli, prog)
+	switch action {
+	case "import":
+		byteCnt = runImport(cli, appName, dataVersion, inputFile, prog)
+	case "export":
+		byteCnt = runExport(cli, appName, dataVersion, outputDir, prog)
+	}
 
 	<-quit
 
@@ -76,51 +127,81 @@ func main() {
 	)
 }
 
-func runImport(cli *riakcli.Client, prog chan float64) int {
+func runImport(
+	cli *riakcli.Client,
+	appName *string,
+	dataVersion *string,
+	inputFile *string,
+	prog chan float64,
+) int {
 	log.Printf("Start Importing")
 
-	// bucketOverride := func(b []byte) []byte {
-	// 	// version := "mock"
+	bucketOverride := func(b []byte) []byte {
+		bucket := string(b)
+		colonIndex := strings.Index(bucket, ":")
+		atIndex := strings.Index(bucket, "@")
 
-	// 	bucket := string(b)
-	// 	colonIndex := strings.Index(bucket, ":")
-	// 	atIndex := strings.Index(bucket, "@")
+		if (colonIndex < 0) {
+			panic("cannot locate : to find app name prefix")
+		}
 
-	// 	if (colonIndex < 0) {
-	// 		panic("cannot locate : to find app name prefix")
-	// 	}
+		if atIndex >= 0 && atIndex > colonIndex {
+			panic("@ is after :")
+		}
 
-	// 	if atIndex >= 0 && atIndex > colonIndex {
-	// 		panic("@ is after :")
-	// 	}
+		if atIndex + 1 == colonIndex {
+			panic("Empty data version")
+		}
 
-	// 	if strings.Count(bucket, ":") > 1 || strings.Count(bucket, "@") > 1 {
-	// 		panic("more than 1 : or @")
-	// 	}
+		if strings.Count(bucket, ":") > 1 || strings.Count(bucket, "@") > 1 {
+			panic("more than 1 : or @")
+		}
 
-	// 	// var appNameIndex int
+		var origAppName string
+		var origDataVersion string
+		var bucketName string
+		var resBucket string
 
-	// 	// if atIndex < 0 {
-	// 	// 	appNameIndex = colonIndex
-	// 	// } else if (atIndex < colonIndex) {
-	// 	// 	appNameIndex = atIndex
-	// 	// } else {
-	// 	// 	appNameIndex = colonIndex
-	// 	// }
+		if atIndex >= 0 {
+			// has data version in backup
+			origAppName = bucket[0:atIndex]
+			origDataVersion = bucket[atIndex + 1:colonIndex]
+		} else {
+			// no data version in backup
+			origAppName = bucket[0:colonIndex]
+		}
 
-	// 	// appName := bucket[0:appNameIndex]
-	// 	bucketName := bucket[colonIndex + 1:]
+		bucketName = bucket[colonIndex + 1:]
 
-	// 	// return []byte(appName + "@" + version + ":" + bucketName)
-	// 	return []byte("teamCS:" + bucketName)
-	// }
+		if len(*appName) == 0 {
+			// no override for app name use original
+			appName = &origAppName
+		}
+		resBucket = *appName
 
-	f, err := os.Open("./data-export")
+		if len(*dataVersion) > 0 {
+			// has override for data version
+			resBucket += "@" + *dataVersion
+		} else if len(origDataVersion) > 0 {
+			// has original data version either
+			resBucket += "@" + origDataVersion
+		}
+
+		resBucket += ":" + bucketName
+
+		return []byte(resBucket)
+	}
+
+	if len(*inputFile) == 0 {
+		panic("missing input file")
+	}
+
+	f, err := os.Open(*inputFile)
 	check(err)
 	defer f.Close()
 	input := bufio.NewReader(f)
 
-	importation := riakdata.NewImport(cli, input, nil);
+	importation := riakdata.NewImport(cli, input, bucketOverride);
 
 	cnt, err := importation.Run(prog)
 	check(err)
@@ -128,10 +209,30 @@ func runImport(cli *riakcli.Client, prog chan float64) int {
 	return cnt
 }
 
-func runExport(cli *riakcli.Client, prog chan float64) int {
+func runExport(
+	cli *riakcli.Client,
+	appName *string,
+	dataVersion *string,
+	outputDir *string,
+	prog chan float64,
+) int {
 	log.Printf("Start Exporting")
 
-	f, err := os.Create("./data-export")
+	if len(*appName) == 0 {
+		panic("missing app name")
+	}
+
+	prefix := *appName
+
+	if len(*dataVersion) > 0 {
+		// has data version
+		prefix += "@" + *dataVersion
+	}
+
+	f, err := os.Create(path.Join(
+		*outputDir,
+		prefix + "." + time.Now().Format(time.RFC3339) + ".bin",
+	))
 	check(err)
 	defer f.Close()
 	output := bufio.NewWriter(f)
@@ -139,7 +240,7 @@ func runExport(cli *riakcli.Client, prog chan float64) int {
 	export := riakdata.NewExport(
 		cli,
 		func(k []byte) bool {
-			match, err := regexp.MatchString("^teamDerek:.*$", string(k))
+			match, err := regexp.MatchString("^" + prefix + ":.*$", string(k))
 
 			return err == nil && match
 		},
