@@ -1,63 +1,144 @@
 package data
 
 import (
+	"errors"
 	"bufio"
-	"fmt"
 	"log"
+	"reflect"
+	"sync"
+	"net"
+	"time"
 
 	riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
 )
 
-type bucketProcessResult struct {
-	bucketType []byte
-	bucket []byte
-	keyCnt int
+var (
+	AlreadyRunning = errors.New("Export is already running")
+)
+
+type Export struct {
+	cli *riakcli.Client
+	filterFn func([]byte) bool
+	bucketTypes []string
+	dtBucketTypes []string
+	output *bufio.Writer
+	outputChan chan []byte
+	errorChan chan error
+	wg sync.WaitGroup
 }
 
-func (b *bucketProcessResult) String() string {
-	return fmt.Sprintf("%s~%s: %d keys", b.bucketType, b.bucket, b.keyCnt)
-}
-
-func Export(
+func NewExport(
 		cli *riakcli.Client,
 		filterFn func([]byte) bool,
 		bucketTypes []string,
 		dtBucketTypes []string,
 		output *bufio.Writer,
-) (err error) {
-	for _, bt := range bucketTypes {
-		err = processBucketType(cli, filterFn, []byte(bt), false, output)
-
-		if (err != nil) {
-			break
-		}
+) *Export {
+	// filter buckets
+	if (filterFn == nil) {
+		filterFn = func([]byte) bool { return true }
 	}
 
-	for _, bt := range dtBucketTypes {
-		err = processBucketType(cli, filterFn, []byte(bt), true, output)
+	return &Export{
+		cli: cli,
+		filterFn: filterFn,
+		bucketTypes: bucketTypes,
+		dtBucketTypes: dtBucketTypes,
+		output: output,
+	}
+}
 
-		if (err != nil) {
-			break
-		}
+func (e *Export) Run() (err error) {
+
+	if e.outputChan != nil {
+		return AlreadyRunning
 	}
 
+	startTime := time.Now()
+	log.Printf(
+		"Exporting the following bucket types %s %s",
+		e.bucketTypes, e.dtBucketTypes,
+	)
+
+	e.outputChan = make(chan []byte)
+	e.errorChan = make(chan error)
+
+	totalByteCnt := 0
+	quit := make(chan int)
+
+	go func() {
+		for {
+			select {
+			case data, ok := <- e.outputChan:
+				if ok {
+					totalByteCnt += len(data)
+					_, err = e.output.Write(data)
+				} else {
+					err = e.output.Flush()
+					goto QUIT
+				}
+			case err = <- e.errorChan:
+				goto QUIT
+			}
+		}
+
+QUIT:
+		quit <- 0
+	}()
+
+	e.wg.Add(len(e.bucketTypes))
+	for _, bt := range e.bucketTypes {
+		go e.processBucketType([]byte(bt))
+	}
+
+	e.wg.Add(len(e.dtBucketTypes))
+	for _, bt := range e.dtBucketTypes {
+		go e.processBucketType([]byte(bt))
+	}
+
+	e.wg.Wait()
+
+	// no more data after this point
+	close(e.outputChan)
+	close(e.errorChan)
+
+	<-quit
+
+	if err == nil {
+		log.Printf(
+			"%d total bytes writen in %s", totalByteCnt, time.Since(startTime),
+		)
+	}
+
+	e.outputChan = nil
+	e.errorChan  = nil
 	return
 }
 
-func processBucketType(
-		cli *riakcli.Client,
-		filterFn func([]byte) bool,
-		bt []byte,
-		isRiakDt bool,
-		output *bufio.Writer,
-) (err error) {
+func (e *Export) isRiakDtBucket(bucket []byte) bool {
+	for _, b := range e.dtBucketTypes {
+		if reflect.DeepEqual(bucket, b) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (e *Export) processBucketType(bt []byte) {
+	defer e.wg.Done()
+
 	isStreaming := true
 	req := riakprotobuf.RpbListBucketsReq{ Type: bt, Stream: &isStreaming }
 
-	err, conn, _ := cli.SendMessage(&req, riakprotobuf.CodeRpbListBucketsReq)
+	err, conn, _ := e.cli.SendMessage(&req, riakprotobuf.CodeRpbListBucketsReq)
+
 	if err != nil {
+		e.errorChan <- err
 		return
+	} else {
+		defer e.cli.ReleaseConnection(conn)
 	}
 
 	var (
@@ -68,8 +149,9 @@ func processBucketType(
 
 	for {
 		partial = &riakprotobuf.RpbListBucketsResp{}
-		err = cli.ReceiveMessage(conn, partial, true)
+		err = e.cli.ReceiveMessage(conn, partial, true)
 		if (err != nil) {
+			e.errorChan <- err
 			return
 		}
 
@@ -80,73 +162,42 @@ func processBucketType(
 		}
 	}
 
-	cli.ReleaseConnection(conn)
-
-	// filter buckets
-	if (filterFn == nil) {
-		filterFn = func([]byte) bool { return true }
-	}
-
 	for _, b := range buckets {
-		if (filterFn(b)) {
+		if (e.filterFn(b)) {
 			filteredBuckets = append(filteredBuckets, b)
 		}
 	}
 
 	filteredBucketsCnt := len(filteredBuckets)
 
-	log.Printf(
-		"%d buckets retrieved in type [%s] %d to be processed",
-		len(buckets),
-		bt,
-		filteredBucketsCnt,
-	)
-
 	if filteredBucketsCnt == 0 {
 		return
 	}
 
-	// process
-	resultChan := make(chan bucketProcessResult)
-	errorChan := make(chan error)
+	// fan out process
+	log.Printf(
+		"%d buckets to be to processed of bucket type [%s] (out of %d)",
+		filteredBucketsCnt, bt, len(buckets),
+	)
+
+	e.wg.Add(filteredBucketsCnt)
 
 	for _, b := range filteredBuckets {
-		go processBucket(cli, bt, b, isRiakDt, resultChan, errorChan, output)
-	}
-
-	// and wait
-	remain := filteredBucketsCnt
-
-	for {
-		select {
-		case r := <-resultChan:
-			log.Printf("processed %s", &r)
-			remain -= 1
-
-			if remain == 0 {
-				return
-			}
-		case err = <-errorChan:
-			// abort
-			return
-		}
+		go e.processBucket(bt, b)
 	}
 }
 
-func processBucket(
-		cli *riakcli.Client,
-		bt []byte, bucket []byte,
-		isRiakDt bool,
-		resultChan chan bucketProcessResult,
-		errorChan chan error,
-		output *bufio.Writer,
-) {
+func (e *Export) processBucket(bt []byte, bucket []byte) {
+	defer e.wg.Done()
+
 	req := riakprotobuf.RpbListKeysReq{ Type: bt, Bucket: bucket }
 
-	err, conn, _ := cli.SendMessage(&req, riakprotobuf.CodeRpbListKeysReq)
+	err, conn, _ := e.cli.SendMessage(&req, riakprotobuf.CodeRpbListKeysReq)
 	if err != nil {
-		errorChan <- err
+		e.errorChan <- err
 		return
+	} else {
+		defer e.cli.ReleaseConnection(conn)
 	}
 
 	var (
@@ -156,9 +207,9 @@ func processBucket(
 
 	for {
 		partial = &riakprotobuf.RpbListKeysResp{}
-		err = cli.ReceiveMessage(conn, partial, true)
+		err = e.cli.ReceiveMessage(conn, partial, true)
 		if (err != nil) {
-			errorChan <- err
+			e.errorChan <- err
 			return
 		}
 
@@ -169,117 +220,64 @@ func processBucket(
 		}
 	}
 
-	cli.ReleaseConnection(conn)
-
-	// process
-	outputChan := make(chan []byte)
-	childErrorChan := make(chan error)
+	// fan out process
 	keyCnt := len(keys)
 
+	log.Printf(
+		"%d keys to be to processed in bucket [%s] of bucket type [%s]",
+		keyCnt, bucket, bt,
+	)
+
+	e.wg.Add(keyCnt)
+
 	for _, key := range keys {
-		if isRiakDt {
-			go processDT(cli, bt, bucket, key, outputChan, childErrorChan)
-		} else {
-			go processKV(cli, bt, bucket, key, outputChan, childErrorChan)
-		}
-	}
-
-	// and wait
-	remain := keyCnt
-
-	for {
-		select {
-		case data := <-outputChan:
-			if (data == nil) {
-				// end of input
-				if remain -= 1; remain == 0 {
-					// done
-					resultChan <- bucketProcessResult{
-						bucketType: bt,
-						bucket: bucket,
-						keyCnt: keyCnt,
-					};
-
-					return
-				}
-			} else {
-				_, err = output.Write(data)
-			}
-		case err = <-errorChan:
-			return
-		}
-
-		if err != nil {
-			// pass it up, then abort
-			errorChan <- err
-			return
-		}
+		go e.processKey(bt, bucket, key)
 	}
 }
 
-func processKV(
-		cli *riakcli.Client,
-		bt []byte, bucket []byte, key []byte,
-		outputChan chan []byte,
-		errorChan chan error,
-) {
-	req := riakprotobuf.RpbGetReq{
-		Type: bt,
-		Bucket: bucket,
-		Key: key,
+func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
+	defer e.wg.Done()
+
+	var (
+		err error
+		conn *net.TCPConn
+		reqbuf []byte
+	)
+
+	if (e.isRiakDtBucket(bucket)) {
+		req := riakprotobuf.DtFetchReq{
+			Type: bt,
+			Bucket: bucket,
+			Key: key,
+		}
+
+		err, conn, reqbuf = e.cli.SendMessage(&req, riakprotobuf.CodeDtFetchReq)
+	} else {
+		req := riakprotobuf.RpbGetReq{
+			Type: bt,
+			Bucket: bucket,
+			Key: key,
+		}
+
+		err, conn, reqbuf = e.cli.SendMessage(&req, riakprotobuf.CodeRpbGetReq)
 	}
 
-	err, conn, reqbuf := cli.SendMessage(&req, riakprotobuf.CodeRpbGetReq)
 	if err != nil {
-		errorChan <- err
+		e.errorChan <- err
 		return
 	}
 
 	// no need to unmarshal this
-	err, headerbuf, responsebuf := cli.ReceiveRawMessage(conn, false)
+	err, headerbuf, responsebuf := e.cli.ReceiveRawMessage(conn, false)
 	if (err != nil) {
-		errorChan <- err
+		e.errorChan <- err
 		return
 	}
 
 	// output the raw messages
 	// all messages should be self-decoding
 
-	outputChan <- reqbuf
-	outputChan <- headerbuf
-	outputChan <- responsebuf
-	outputChan <- nil
-}
-
-func processDT(
-		cli *riakcli.Client,
-		bt []byte, bucket []byte, key []byte,
-		outputChan chan []byte,
-		errorChan chan error,
-) {
-	req := riakprotobuf.DtFetchReq{
-		Type: bt,
-		Bucket: bucket,
-		Key: key,
-	}
-
-	err, conn, reqbuf := cli.SendMessage(&req, riakprotobuf.CodeDtFetchReq)
-	if err != nil {
-		errorChan <- err
-		return
-	}
-
-	err, headerbuf, responsebuf := cli.ReceiveRawMessage(conn, false)
-	if (err != nil) {
-		errorChan <- err
-		return
-	}
-
-	// output the raw messages
-	// all messages should be self-decoding
-
-	outputChan <- reqbuf
-	outputChan <- headerbuf
-	outputChan <- responsebuf
-	outputChan <- nil
+	e.outputChan <- reqbuf
+	e.outputChan <- headerbuf
+	e.outputChan <- responsebuf
 }

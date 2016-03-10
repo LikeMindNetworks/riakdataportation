@@ -79,10 +79,10 @@ func (c *Client) Connect() error {
 			return err
 		}
 
-		log.Printf("Connection #%d to %s successful", i, tcpaddr)
 		c.conns <- conn.(*net.TCPConn)
 	}
 
+	log.Printf("[%d] connections to %s successful", c.connCnt, tcpaddr)
 	return nil
 }
 
@@ -96,11 +96,11 @@ func (c *Client) Close() {
 		conn := <-c.conns
 
 		if (conn != nil) {
-			log.Printf("Connection #%d to %s closed", i, conn.RemoteAddr())
 			conn.Close()
 		}
 	}
 
+	log.Printf("[%d] connections closed", c.connCnt)
 	c.conns <- nil
 }
 
