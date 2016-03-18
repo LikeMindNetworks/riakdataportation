@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"io"
 	"sync"
+	"log"
 
 	"github.com/golang/protobuf/proto"
 
@@ -78,6 +79,11 @@ func (imp *Import) Run(progressChan chan float64) (byteCnt int, err error) {
 				}
 			case err, _ = <- imp.errorChan:
 				// either there is an error, or the channel ended
+
+				if err != nil {
+					log.Printf("Error during import: %s", err);
+				}
+
 				quit <- 0
 			}
 		}

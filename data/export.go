@@ -6,7 +6,7 @@ import (
 	"sync"
 	"net"
 
-	// "log"
+	"log"
 
 	riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
@@ -93,6 +93,10 @@ func (e *Export) Run(progressChan chan float64) (byteCnt int, err error) {
 			case u := <- e.unitOfWorkChan:
 				unitOfWorkTotal += u
 			case err = <- e.errorChan:
+				if err != nil {
+					log.Printf("Error during import: %s", err);
+				}
+
 				goto QUIT
 			}
 		}

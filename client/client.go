@@ -148,6 +148,7 @@ func (c *Client) SendMessage(
 		if operr, ok := err.(*net.OpError); ok {
 			if errno, ok = operr.Err.(syscall.Errno); ok {
 				if errno == syscall.EPIPE {
+					log.Printf("Broken PIPE: %d", errno);
 					c.Close()
 				}
 			}
@@ -169,8 +170,6 @@ func (c *Client) ReceiveRawMessage(
 		c.ReleaseConnection(conn)
 
 		if err == io.EOF {
-			// Connection was closed, try to re-open the connection so subsequent
-			// i/o can succeed. Does report the error for this response.
 			c.Close()
 		}
 
