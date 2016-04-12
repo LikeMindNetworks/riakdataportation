@@ -240,6 +240,10 @@ func (imp *Import) importKV(
 	req *riakprotobuf.RpbGetReq,
 	res *riakprotobuf.RpbGetResp,
 ) {
+	if len(res.Content) == 0 {
+		return
+	}
+
 	newReq := riakprotobuf.RpbPutReq{
 		Type: req.Type,
 		Bucket: imp.bucketOverrideFn(req.Bucket),
