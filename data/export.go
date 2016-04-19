@@ -28,6 +28,7 @@ type Export struct {
 	unitOfWorkChan chan int
 	unitOfWorkFinishedChan chan int
 	wg sync.WaitGroup
+	isDeleteAfter bool
 }
 
 func NewExport(
@@ -36,6 +37,7 @@ func NewExport(
 		bucketTypes []string,
 		dtBucketTypes []string,
 		output *bufio.Writer,
+		isDeleteAfter bool,
 ) *Export {
 	// filter buckets
 	if (filterFn == nil) {
@@ -48,6 +50,7 @@ func NewExport(
 		bucketTypes: bucketTypes,
 		dtBucketTypes: dtBucketTypes,
 		output: output,
+		isDeleteAfter: isDeleteAfter,
 	}
 }
 
@@ -267,7 +270,7 @@ func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
 		reqbuf []byte
 	)
 
-	if (e.isRiakDtBucketType(bt)) {
+	if e.isRiakDtBucketType(bt) {
 		req := riakprotobuf.DtFetchReq{
 			Type: bt,
 			Bucket: bucket,
@@ -295,6 +298,17 @@ func (e *Export) processKey(bt []byte, bucket []byte, key []byte) {
 	if (err != nil) {
 		e.errorChan <- err
 		return
+	}
+
+	// delete after output
+
+	if e.isDeleteAfter {
+		err := e.cli.ClearKey(bt, bucket, key, e.isRiakDtBucketType(bt))
+
+		if err != nil {
+			e.errorChan <- err
+			return
+		}
 	}
 
 	// output the raw messages

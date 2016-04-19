@@ -24,6 +24,8 @@ type Import struct {
 	wg sync.WaitGroup
 	errorChan chan error
 	byteTransferedChan chan int
+	isDeleteFirst bool
+	isDryRun bool
 }
 
 type reqRespPair struct {
@@ -37,6 +39,8 @@ func NewImport(
 		cli *riakcli.Client,
 		input *bufio.Reader,
 		bucketOverrideFn func([]byte) []byte,
+		isDryRun bool,
+		isDeleteFirst bool,
 ) *Import {
 	if (bucketOverrideFn == nil) {
 		bucketOverrideFn = func(x []byte) []byte { return x }
@@ -46,6 +50,8 @@ func NewImport(
 		cli: cli,
 		input: input,
 		bucketOverrideFn: bucketOverrideFn,
+		isDeleteFirst: isDeleteFirst,
+		isDryRun: isDryRun,
 	}
 }
 
@@ -244,6 +250,24 @@ func (imp *Import) importKV(
 		return
 	}
 
+	if imp.isDryRun {
+		return
+	}
+
+	if imp.isDeleteFirst {
+		err := imp.cli.ClearKey(
+			req.Type,
+			imp.bucketOverrideFn(req.Bucket),
+			req.Key,
+			false,
+		)
+
+		if err != nil {
+			imp.errorChan <- err
+			return
+		}
+	}
+
 	newReq := riakprotobuf.RpbPutReq{
 		Type: req.Type,
 		Bucket: imp.bucketOverrideFn(req.Bucket),
@@ -289,6 +313,24 @@ func (imp *Import) importDT(
 		Key: req.Key,
 		Op: dtop,
 		W: &w,
+	}
+
+	if imp.isDryRun {
+		return
+	}
+
+	if imp.isDeleteFirst {
+		err := imp.cli.ClearKey(
+			req.Type,
+			imp.bucketOverrideFn(req.Bucket),
+			req.Key,
+			true,
+		)
+
+		if err != nil {
+			imp.errorChan <- err
+			return
+		}
 	}
 
 	err, conn, _ := imp.cli.SendMessage(&newReq, riakprotobuf.CodeDtUpdateReq)

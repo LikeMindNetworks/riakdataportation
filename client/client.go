@@ -3,11 +3,11 @@ package client
 import (
 	"errors"
 	"net"
-	"io"
 	"log"
 	"sync"
 	"syscall"
 	"time"
+	// b64 "encoding/base64"
 
 	"github.com/golang/protobuf/proto"
 
@@ -19,6 +19,7 @@ type Client struct {
 	conns chan *net.TCPConn
 	connCnt int
 	connMutex sync.RWMutex
+	IsVerbose bool
 }
 
 var (
@@ -27,7 +28,7 @@ var (
 	ChanWaitTimeout = errors.New("Waiting for an available connection timed out")
 )
 
-func NewClient(host string, connCnt int) *Client {
+func NewClient(host string, connCnt int, isVerbose bool) *Client {
 	chanBufSize := connCnt;
 
 	if (chanBufSize < 1) {
@@ -38,6 +39,7 @@ func NewClient(host string, connCnt int) *Client {
 		host: host,
 		connCnt: connCnt,
 		conns: make(chan *net.TCPConn, chanBufSize),
+		IsVerbose: isVerbose,
 	}
 
 	return cli
@@ -163,21 +165,15 @@ func (c *Client) ReceiveRawMessage(
 		conn *net.TCPConn, keepAlive bool,
 ) (err error, headerbuf []byte, responsebuf []byte) {
 
+	if !keepAlive {
+		defer c.ReleaseConnection(conn)
+	}
+
 	// Read the response from Riak
 	err, headerbuf = c.read(conn, 5)
 
 	if err != nil {
-		c.ReleaseConnection(conn)
-
-		if err == io.EOF {
-			c.Close()
-		}
-
 		return err, nil, nil
-	}
-
-	if (!keepAlive) {
-		defer c.ReleaseConnection(conn)
 	}
 
 	// Check the length
@@ -192,6 +188,12 @@ func (c *Client) ReceiveRawMessage(
 		int(headerbuf[3])
 
 	err, responsebuf = c.read(conn, msglen - 1)
+
+	// if err == nil && c.IsVerbose {
+	// 	log.Printf(
+	// 		"Raw Msg received header: %X Msg size: %d", headerbuf, msglen,
+	// 	)
+	// }
 
 	return
 }
@@ -222,7 +224,6 @@ func (c *Client) ReceiveMessage(
 			riakprotobuf.CodeRpbDelResp:
 		return nil
 	default:
-		// log.Printf("Msg code: %d Msg size: %d received", msgcode, msglen)
 		err = proto.Unmarshal(responsebuf, response)
 	}
 
@@ -242,6 +243,80 @@ func (c *Client) read(
 		if err != nil {
 			return
 		}
+	}
+
+	return
+}
+
+func (c *Client) ClearKey(
+	bt []byte, bucket []byte, key []byte, isRiakDtBucketType bool,
+) (err error) {
+	var (
+		conn *net.TCPConn
+	)
+
+	// dtRes := &riakprotobuf.DtFetchResp{}
+	// kvRes := &riakprotobuf.RpbGetResp{}
+	// trueVal := true
+	// var vclock []byte
+
+	// if isRiakDtBucketType {
+	// 	req := riakprotobuf.DtFetchReq{
+	// 		Type: bt,
+	// 		Bucket: bucket,
+	// 		Key: key,
+	// 		NotfoundOk: &trueVal,
+	// 	}
+
+	// 	err, conn, _ = c.SendMessage(&req, riakprotobuf.CodeDtFetchReq)
+	// } else {
+	// 	req := riakprotobuf.RpbGetReq{
+	// 		Type: bt,
+	// 		Bucket: bucket,
+	// 		Key: key,
+	// 		Head: &trueVal,
+	// 		NotfoundOk: &trueVal,
+	// 	}
+
+	// 	err, conn, _ = c.SendMessage(&req, riakprotobuf.CodeRpbGetReq)
+	// }
+
+	// if err != nil {
+	// 	return
+	// }
+
+	// if isRiakDtBucketType {
+	// 	err = c.ReceiveMessage(conn, dtRes, false)
+	// } else {
+	// 	err = c.ReceiveMessage(conn, kvRes, false)
+	// }
+
+	// if err != nil {
+	// 	return
+	// }
+
+	// if isRiakDtBucketType {
+	// 	vclock = dtRes.Context
+	// } else {
+	// 	vclock = kvRes.Vclock
+	// }
+
+	req := riakprotobuf.RpbDelReq{
+		Type: bt,
+		Bucket: bucket,
+		Key: key,
+	}
+
+	err, conn, _ = c.SendMessage(&req, riakprotobuf.CodeRpbDelReq)
+
+	if err != nil {
+		return
+	}
+
+	err, _, _ = c.ReceiveRawMessage(conn, false)
+
+	if c.IsVerbose {
+		log.Printf("Deleted:: %s %s %s", bt, bucket, key)
 	}
 
 	return

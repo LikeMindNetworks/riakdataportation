@@ -15,9 +15,11 @@ import (
 
 	riakdata "github.com/likemindnetworks/riakdataportation/data"
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
+
+	// riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 )
 
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 func check(e error) {
 	if e != nil {
@@ -40,6 +42,16 @@ func main() {
 		inputFile = flag.String("i", "", "input file for import")
 		outputDir = flag.String("o", ".", "output folder for export result")
 		printVersion = flag.Bool("v", false, "print version")
+		verbose = flag.Bool("verbose", false, "print debug statements")
+
+		dryrunImport = flag.Bool("dryrun-import", false, "dry run import")
+		deleteBeforeImport = flag.Bool(
+			"delete-before-import", false, "delete values before import",
+		)
+
+		deleteAfterExport = flag.Bool(
+			"delete-after-export", false, "delete values after export (wipe db)",
+		)
 	)
 
 	flag.Parse()
@@ -67,9 +79,45 @@ func main() {
 		panic("app name and data version should never contain @ or :")
 	}
 
+	// printing flags
+	fmt.Printf("Task: %s\n", action)
+	fmt.Printf("Host: %s\n", host)
+	fmt.Printf("Verbose: %t\n", *verbose)
+	fmt.Printf("App Name: %s\n", *appName)
+	fmt.Printf("Data Version: @%s\n", *dataVersion)
+
+	if action == "import" {
+		fmt.Printf("Input File: %s\n", *inputFile)
+		fmt.Printf("Dry Run: %t\n", *dryrunImport)
+		fmt.Printf("Delete Before Import: %t\n", *deleteBeforeImport)
+	} else {
+		fmt.Printf("Output Directory: %s\n", *outputDir)
+		fmt.Printf("Wipe DB(-delete-after-export): %t\n", *deleteAfterExport)
+	}
+	// end printing flags
+
+	// confirmation
+
+	needToConfirm := false
+
 	// warn when try to override appName during import
 	if action == "import" && len(*appName) > 0 {
-		fmt.Println("Trying to override app name during import. Are you sure?");
+		fmt.Println("Trying to override app name during import. Are you sure?")
+		needToConfirm = true
+	}
+
+	if action == "export" {
+		if len(*appName) == 0 {
+			panic("must specify app name")
+		}
+
+		if *deleteAfterExport {
+			fmt.Println("Trying to wipe data for %s. Are you sure?", *appName)
+			needToConfirm = true
+		}
+	}
+
+	if needToConfirm {
 		fmt.Printf("Type the full app name (%s) to confirm: ", *appName)
 
 		readConfirm := bufio.NewReader(os.Stdin)
@@ -83,7 +131,7 @@ func main() {
 	// start
 	startTime := time.Now()
 
-	var cli = riakcli.NewClient(host, *numConnection)
+	var cli = riakcli.NewClient(host, *numConnection, *verbose)
 
 	err := cli.Connect()
 	check(err)
@@ -120,11 +168,19 @@ func main() {
 
 	var byteCnt int
 
-	switch action {
-	case "import":
-		byteCnt = runImport(cli, appName, dataVersion, inputFile, prog)
-	case "export":
-		byteCnt = runExport(cli, appName, dataVersion, outputDir, prog)
+	if runTest(cli) {
+		switch action {
+		case "import":
+			byteCnt = runImport(
+				cli, appName, dataVersion, inputFile,
+				*dryrunImport, *deleteBeforeImport, prog,
+			)
+		case "export":
+			byteCnt = runExport(
+				cli, appName, dataVersion, outputDir,
+				*deleteAfterExport, prog,
+			)
+		}
 	}
 
 	<-quit
@@ -139,11 +195,18 @@ func main() {
 	)
 }
 
+func runTest(cli *riakcli.Client) (res bool) {
+	res = true
+	return
+}
+
 func runImport(
 	cli *riakcli.Client,
 	appName *string,
 	dataVersion *string,
 	inputFile *string,
+	isDryRun bool,
+	isDeleteFirst bool,
 	prog chan float64,
 ) int {
 	log.Printf("Start Importing")
@@ -213,7 +276,9 @@ func runImport(
 	defer f.Close()
 	input := bufio.NewReader(f)
 
-	importation := riakdata.NewImport(cli, input, bucketOverride);
+	importation := riakdata.NewImport(
+		cli, input, bucketOverride, isDryRun, isDeleteFirst,
+	);
 
 	cnt, err := importation.Run(prog)
 	check(err)
@@ -226,6 +291,7 @@ func runExport(
 	appName *string,
 	dataVersion *string,
 	outputDir *string,
+	isDeleteAfter bool,
 	prog chan float64,
 ) int {
 	log.Printf("Start Exporting")
@@ -259,6 +325,7 @@ func runExport(
 		[]string{"data"},
 		[]string{"sets", "maps", "counters"},
 		output,
+		isDeleteAfter,
 	);
 
 	cnt, err := export.Run(prog)
