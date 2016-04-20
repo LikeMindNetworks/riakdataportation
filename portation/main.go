@@ -19,7 +19,7 @@ import (
 	// riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 )
 
-const Version = "1.1.0"
+const Version = "1.1.1"
 
 func check(e error) {
 	if e != nil {
@@ -112,7 +112,10 @@ func main() {
 		}
 
 		if *deleteAfterExport {
-			fmt.Println("Trying to wipe data for %s. Are you sure?", *appName)
+			fmt.Printf(
+				"Trying to wipe data for %s@%s. Are you sure?\n",
+				*appName, *dataVersion,
+			)
 			needToConfirm = true
 		}
 	}
