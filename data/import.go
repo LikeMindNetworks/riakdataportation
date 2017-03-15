@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"log"
+	"net"
 
 	"github.com/golang/protobuf/proto"
 
@@ -26,6 +27,8 @@ type Import struct {
 	byteTransferedChan chan int
 	isDeleteFirst bool
 	isDryRun bool
+	isForceOriVclock bool
+	isNoVclock bool
 }
 
 type reqRespPair struct {
@@ -41,6 +44,8 @@ func NewImport(
 		bucketOverrideFn func([]byte) []byte,
 		isDryRun bool,
 		isDeleteFirst bool,
+		isForceOriVclock bool,
+		isNoVclock bool,
 ) *Import {
 	if (bucketOverrideFn == nil) {
 		bucketOverrideFn = func(x []byte) []byte { return x }
@@ -52,6 +57,8 @@ func NewImport(
 		bucketOverrideFn: bucketOverrideFn,
 		isDeleteFirst: isDeleteFirst,
 		isDryRun: isDryRun,
+		isForceOriVclock: isForceOriVclock,
+		isNoVclock: isNoVclock,
 	}
 }
 
@@ -242,6 +249,35 @@ func (imp *Import) processPair(pair *reqRespPair) {
 	imp.byteTransferedChan <- len(pair.reqBuf) + len(pair.resBuf) + 10
 }
 
+func (imp *Import) fetchKVVclock(bt []byte, bucket []byte, key []byte) (vk []byte, err error) {
+	var conn *net.TCPConn
+
+	req := riakprotobuf.RpbGetReq{
+		Type: bt,
+		Bucket: bucket,
+		Key: key,
+	}
+
+	err, conn, _ = imp.cli.SendMessage(&req, riakprotobuf.CodeRpbGetReq)
+
+	if err != nil {
+		return
+	}
+
+	err, _, responsebuf := imp.cli.ReceiveRawMessage(conn, false)
+
+	resMsg := &riakprotobuf.RpbGetResp{}
+	err = proto.Unmarshal(responsebuf, resMsg)
+
+	if err != nil {
+		return
+	} else {
+		vk = resMsg.Vclock
+	}
+
+	return
+}
+
 func (imp *Import) importKV(
 	req *riakprotobuf.RpbGetReq,
 	res *riakprotobuf.RpbGetResp,
@@ -268,11 +304,40 @@ func (imp *Import) importKV(
 		}
 	}
 
-	newReq := riakprotobuf.RpbPutReq{
-		Type: req.Type,
-		Bucket: imp.bucketOverrideFn(req.Bucket),
-		Key: req.Key,
-		Content: res.Content[0],
+	var (
+		newReq riakprotobuf.RpbPutReq
+		vk []byte
+		err error
+	)
+
+	if imp.isForceOriVclock {
+		vk = res.Vclock
+	} else if imp.isNoVclock {
+		vk = nil
+	} else {
+		vk, err = imp.fetchKVVclock(req.Type, imp.bucketOverrideFn(req.Bucket), req.Key);
+	}
+
+	if err != nil {
+		imp.errorChan <- err
+		return
+	}
+
+	if vk != nil && len(vk) > 0 {
+		newReq = riakprotobuf.RpbPutReq{
+			Type: req.Type,
+			Bucket: imp.bucketOverrideFn(req.Bucket),
+			Key: req.Key,
+			Content: res.Content[0],
+			Vclock: vk,
+		}
+	} else {
+		newReq = riakprotobuf.RpbPutReq{
+			Type: req.Type,
+			Bucket: imp.bucketOverrideFn(req.Bucket),
+			Key: req.Key,
+			Content: res.Content[0],
+		}
 	}
 
 	err, conn, _ := imp.cli.SendMessage(&newReq, riakprotobuf.CodeRpbPutReq)

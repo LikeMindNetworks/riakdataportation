@@ -45,6 +45,8 @@ func main() {
 		verbose = flag.Bool("verbose", false, "print debug statements")
 
 		dryrunImport = flag.Bool("dryrun-import", false, "dry run import")
+		forceOriVclock = flag.Bool("fov", false, "force to use original vclock for import")
+		noVclock = flag.Bool("nv", false, "force to use no vclock for import")
 		deleteBeforeImport = flag.Bool(
 			"delete-before-import", false, "delete values before import",
 		)
@@ -77,6 +79,10 @@ func main() {
 	if strings.ContainsAny(*appName, "@:") ||
 			strings.ContainsAny(*dataVersion, "@:") {
 		panic("app name and data version should never contain @ or :")
+	}
+
+	if *forceOriVclock && *noVclock {
+		panic("flag 'fov' and 'nv' cannot be used together")
 	}
 
 	// printing flags
@@ -176,7 +182,7 @@ func main() {
 		case "import":
 			byteCnt = runImport(
 				cli, appName, dataVersion, inputFile,
-				*dryrunImport, *deleteBeforeImport, prog,
+				*dryrunImport, *deleteBeforeImport, *forceOriVclock, *noVclock, prog,
 			)
 		case "export":
 			byteCnt = runExport(
@@ -210,6 +216,8 @@ func runImport(
 	inputFile *string,
 	isDryRun bool,
 	isDeleteFirst bool,
+	isForceOriVclock bool,
+	isNoVclock bool,
 	prog chan float64,
 ) int {
 	log.Printf("Start Importing")
@@ -280,7 +288,7 @@ func runImport(
 	input := bufio.NewReader(f)
 
 	importation := riakdata.NewImport(
-		cli, input, bucketOverride, isDryRun, isDeleteFirst,
+		cli, input, bucketOverride, isDryRun, isDeleteFirst, isForceOriVclock, isNoVclock,
 	);
 
 	cnt, err := importation.Run(prog)
