@@ -19,7 +19,7 @@ import (
 	// riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 )
 
-const Version = "1.1.1"
+const Version = "1.1.2"
 
 func check(e error) {
 	if e != nil {
