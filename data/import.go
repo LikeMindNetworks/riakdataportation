@@ -29,6 +29,8 @@ type Import struct {
 	isDryRun bool
 	isForceOriVclock bool
 	isNoVclock bool
+	bucketTypes []string
+	dtBucketTypes []string
 }
 
 type reqRespPair struct {
@@ -46,6 +48,8 @@ func NewImport(
 		isDeleteFirst bool,
 		isForceOriVclock bool,
 		isNoVclock bool,
+		bucketTypes []string,
+		dtBucketTypes []string,
 ) *Import {
 	if (bucketOverrideFn == nil) {
 		bucketOverrideFn = func(x []byte) []byte { return x }
@@ -59,6 +63,8 @@ func NewImport(
 		isDryRun: isDryRun,
 		isForceOriVclock: isForceOriVclock,
 		isNoVclock: isNoVclock,
+		bucketTypes: bucketTypes,
+		dtBucketTypes: dtBucketTypes,
 	}
 }
 
@@ -196,6 +202,26 @@ func (imp *Import) fillBuffer(buf []byte) (err error) {
 	return
 }
 
+func (imp *Import) isBucketTypeEligible(bt []byte) bool {
+	for _, b := range imp.bucketTypes {
+		if b == string(bt) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (imp *Import) isDtBucketTypeEligible(bt []byte) bool {
+	for _, b := range imp.dtBucketTypes {
+		if b == string(bt) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (imp *Import) processPair(pair *reqRespPair) {
 	defer imp.wg.Done()
 
@@ -283,6 +309,11 @@ func (imp *Import) importKV(
 	res *riakprotobuf.RpbGetResp,
 ) {
 	if len(res.Content) == 0 {
+		return
+	}
+
+	if !imp.isBucketTypeEligible(req.Type) {
+		// log.Printf("skipping bucket type: %s", req.Type)
 		return
 	}
 
@@ -378,6 +409,11 @@ func (imp *Import) importDT(
 		Key: req.Key,
 		Op: dtop,
 		W: &w,
+	}
+
+	if !imp.isDtBucketTypeEligible(req.Type) {
+		// log.Printf("skipping crdt bucket type: %s", req.Type)
+		return
 	}
 
 	if imp.isDryRun {

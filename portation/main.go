@@ -15,8 +15,6 @@ import (
 
 	riakdata "github.com/likemindnetworks/riakdataportation/data"
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
-
-	// riakprotobuf "github.com/likemindnetworks/riakdataportation/protobuf"
 )
 
 const Version = "1.1.2"
@@ -44,6 +42,9 @@ func main() {
 		printVersion = flag.Bool("v", false, "print version")
 		verbose = flag.Bool("verbose", false, "print debug statements")
 
+		btFilterStr = flag.String("bucket-types", "data", "bucket type filters")
+		crdtFilterStr = flag.String("crdt-types", "sets, maps, counters", "CRDT bucket type filters")
+
 		dryrunImport = flag.Bool("dryrun-import", false, "dry run import")
 		forceOriVclock = flag.Bool("fov", false, "force to use original vclock for import")
 		noVclock = flag.Bool("nv", false, "force to use no vclock for import")
@@ -57,6 +58,27 @@ func main() {
 	)
 
 	flag.Parse()
+
+	var (
+		btFilter []string
+		crdtFilter []string
+	)
+
+	for _, bt := range strings.Split(*btFilterStr, ",") {
+		bt = strings.TrimSpace(bt)
+
+		if len(bt) > 0 {
+			btFilter = append(btFilter, bt)
+		}
+	}
+
+	for _, bt := range strings.Split(*crdtFilterStr, ",") {
+		bt = strings.TrimSpace(bt)
+
+		if len(bt) > 0 {
+			crdtFilter = append(crdtFilter, bt)
+		}
+	}
 
 	if *printVersion {
 		fmt.Println(Version)
@@ -91,6 +113,8 @@ func main() {
 	fmt.Printf("Verbose: %t\n", *verbose)
 	fmt.Printf("App Name: %s\n", *appName)
 	fmt.Printf("Data Version: @%s\n", *dataVersion)
+	fmt.Printf("%d Bucket Types: %v\n", len(btFilter), btFilter)
+	fmt.Printf("%d CRDT Bucket Types: %v\n", len(crdtFilter), crdtFilter)
 
 	if action == "import" {
 		fmt.Printf("Input File: %s\n", *inputFile)
@@ -177,19 +201,23 @@ func main() {
 
 	var byteCnt int
 
-	if runTest(cli) {
-		switch action {
-		case "import":
-			byteCnt = runImport(
-				cli, appName, dataVersion, inputFile,
-				*dryrunImport, *deleteBeforeImport, *forceOriVclock, *noVclock, prog,
-			)
-		case "export":
-			byteCnt = runExport(
-				cli, appName, dataVersion, outputDir,
-				*deleteAfterExport, prog,
-			)
-		}
+	switch action {
+	case "import":
+		byteCnt = runImport(
+			cli, appName, dataVersion, inputFile,
+			*dryrunImport, *deleteBeforeImport, *forceOriVclock, *noVclock,
+			btFilter, crdtFilter,
+			prog,
+		)
+	case "export":
+		res := runExport(
+			cli, appName, dataVersion, outputDir, *deleteAfterExport,
+			btFilter, crdtFilter,
+			prog,
+		)
+
+		byteCnt = res.byteCnt
+		defer res.Close()
 	}
 
 	<-quit
@@ -204,11 +232,6 @@ func main() {
 	)
 }
 
-func runTest(cli *riakcli.Client) (res bool) {
-	res = true
-	return
-}
-
 func runImport(
 	cli *riakcli.Client,
 	appName *string,
@@ -218,6 +241,8 @@ func runImport(
 	isDeleteFirst bool,
 	isForceOriVclock bool,
 	isNoVclock bool,
+	btFilter []string,
+	crdtFilter []string,
 	prog chan float64,
 ) int {
 	log.Printf("Start Importing")
@@ -289,6 +314,7 @@ func runImport(
 
 	importation := riakdata.NewImport(
 		cli, input, bucketOverride, isDryRun, isDeleteFirst, isForceOriVclock, isNoVclock,
+		btFilter, crdtFilter,
 	);
 
 	cnt, err := importation.Run(prog)
@@ -297,14 +323,28 @@ func runImport(
 	return cnt
 }
 
+type exportResult struct {
+	file *os.File
+	writer *bufio.Writer
+	byteCnt int
+}
+
+func (r exportResult) Close() error {
+	r.writer.Flush()
+	r.file.Sync()
+	return r.file.Close()
+}
+
 func runExport(
 	cli *riakcli.Client,
 	appName *string,
 	dataVersion *string,
 	outputDir *string,
 	isDeleteAfter bool,
+	btFilter []string,
+	crdtFilter []string,
 	prog chan float64,
-) int {
+) exportResult {
 	log.Printf("Start Exporting")
 
 	if len(*appName) == 0 {
@@ -323,7 +363,7 @@ func runExport(
 		prefix + "." + time.Now().Format(time.RFC3339) + ".bin",
 	))
 	check(err)
-	defer f.Close()
+
 	output := bufio.NewWriter(f)
 
 	export := riakdata.NewExport(
@@ -333,8 +373,8 @@ func runExport(
 
 			return err == nil && match
 		},
-		[]string{"data"},
-		[]string{"sets", "maps", "counters"},
+		btFilter,
+		crdtFilter,
 		output,
 		isDeleteAfter,
 	);
@@ -342,5 +382,5 @@ func runExport(
 	cnt, err := export.Run(prog)
 	check(err)
 
-	return cnt
+	return exportResult{f, output, cnt}
 }
