@@ -17,7 +17,7 @@ import (
 	riakcli "github.com/likemindnetworks/riakdataportation/client"
 )
 
-const Version = "1.1.2"
+const Version = "1.1.3"
 
 func check(e error) {
 	if e != nil {
