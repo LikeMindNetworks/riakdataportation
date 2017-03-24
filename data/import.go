@@ -385,6 +385,35 @@ func (imp *Import) importKV(
 	}
 }
 
+func (imp *Import) fetchCounter(bt []byte, bucket []byte, key []byte) (val int64, err error) {
+	var conn *net.TCPConn
+
+	req := riakprotobuf.DtFetchReq{
+		Type: bt,
+		Bucket: bucket,
+		Key: key,
+	}
+
+	err, conn, _ = imp.cli.SendMessage(&req, riakprotobuf.CodeDtFetchReq)
+
+	if err != nil {
+		return
+	}
+
+	err, _, responsebuf := imp.cli.ReceiveRawMessage(conn, false)
+
+	resMsg := &riakprotobuf.DtFetchResp{}
+	err = proto.Unmarshal(responsebuf, resMsg)
+
+	if err != nil {
+		return
+	} else {
+		val = *resMsg.Value.CounterValue
+	}
+
+	return
+}
+
 func (imp *Import) importDT(
 	req *riakprotobuf.DtFetchReq,
 	res *riakprotobuf.DtFetchResp,
@@ -393,8 +422,15 @@ func (imp *Import) importDT(
 
 	switch *res.Type {
 	case riakprotobuf.DtFetchResp_COUNTER:
-		dtop.CounterOp =
-				&riakprotobuf.CounterOp{ Increment: res.Value.CounterValue }
+		count, err := imp.fetchCounter(req.Type, imp.bucketOverrideFn(req.Bucket), req.Key)
+
+		if err != nil {
+			return
+		} else {
+			count = *res.Value.CounterValue - count
+
+			dtop.CounterOp = &riakprotobuf.CounterOp{ Increment: &count }
+		}
 	case riakprotobuf.DtFetchResp_SET:
 		dtop.SetOp = &riakprotobuf.SetOp{ Adds: res.Value.SetValue }
 	case riakprotobuf.DtFetchResp_MAP:
