@@ -407,7 +407,7 @@ func (imp *Import) fetchCounter(bt []byte, bucket []byte, key []byte) (val int64
 
 	if err != nil {
 		return
-	} else {
+	} else if resMsg.Value != nil {
 		val = *resMsg.Value.CounterValue
 	}
 
